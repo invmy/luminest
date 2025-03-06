@@ -1,3 +1,15 @@
+# 分支修改
+
+- 密码访问
+
+使用变量PWD并且 浏览器访问主页需要列如 `home.com/?pwd=token`
+
+- 照片墙
+
+/gallery 访问照片墙
+
+按照目录划分，文件名会当标签 列如 `标签1-标签2-标签3.webp`
+
 # Luminest
 
 一个基于 Cloudflare Workers 和 R2 存储的轻量级图床服务。

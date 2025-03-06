@@ -9,3 +9,4 @@ preview_bucket_name = "images"
 
 [vars]
 R2_DOMAIN = "https://images.yuanj.top"
+PWD = "token"

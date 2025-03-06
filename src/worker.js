@@ -2,52 +2,262 @@ export default {
     async fetch(request, env) {
         const url = new URL(request.url);
         const path = url.pathname;
-
-        // 处理静态文件路由
-        if (path === '/' || path === '/index.html') {
-            return new Response(INDEX_HTML, {
-                headers: { 'Content-Type': 'text/html' }
+    
+        if (path === "/static/style.css") {
+          return new Response(STYLE_CSS, {
+            headers: { "Content-Type": "text/css" }
+          });
+        }
+        if (path === "/static/script.js") {
+          return new Response(SCRIPT_JS, {
+            headers: { "Content-Type": "application/javascript" }
+          });
+        }
+    
+        if (path === "/api/upload" && request.method === "POST") {
+          return handleUpload(request, env);
+        }
+        if (path === "/api/images" && request.method === "GET") {
+          return handleListImages(request, env);
+        }
+        if (path.startsWith("/api/delete/") && request.method === "DELETE") {
+          const filename = path.split("/").pop();
+          return handleDeleteImage(filename, env);
+        }
+        if (path.startsWith("/api/move/") && request.method === "POST") {
+          const filename = path.split("/").pop();
+          return handleMoveImage(filename, request, env);
+        }
+        if (path.startsWith("/api/rename/") && request.method === "POST") {
+          const filename = path.split("/").pop();
+          return handleRenameImage(filename, request, env);
+        }
+        if (path === "/gallery") {
+            return new Response(GALLERY_HTML, {
+              headers: { "Content-Type": "text/html" }
             });
         }
-        if (path === '/admin') {
-            return new Response(ADMIN_HTML, {
-                headers: { 'Content-Type': 'text/html' }
-            });
+    
+        // 以下需要授权
+        const password = url.searchParams.get("pwd");
+    
+        if (!password || password !== env.PWD) {
+          return new Response("Unauthorized", { status: 401 });
         }
-        if (path === '/static/style.css') {
-            return new Response(STYLE_CSS, {
-                headers: { 'Content-Type': 'text/css' }
-            });
+    
+        if (path === "/" || path === "/index.html") {
+          return new Response(INDEX_HTML, {
+            headers: { "Content-Type": "text/html" }
+          });
         }
-        if (path === '/static/script.js') {
-            return new Response(SCRIPT_JS, {
-                headers: { 'Content-Type': 'application/javascript' }
-            });
+        if (path === "/admin") {
+          return new Response(ADMIN_HTML, {
+            headers: { "Content-Type": "text/html" }
+          });
         }
-
-        // API 路由
-        if (path === '/api/upload' && request.method === 'POST') {
-            return handleUpload(request, env);
-        }
-        if (path === '/api/images' && request.method === 'GET') {
-            return handleListImages(request, env);
-        }
-        if (path.startsWith('/api/delete/') && request.method === 'DELETE') {
-            const filename = path.split('/').pop();
-            return handleDeleteImage(filename, env);
-        }
-        if (path.startsWith('/api/move/') && request.method === 'POST') {
-            const filename = path.split('/').pop();
-            return handleMoveImage(filename, request, env);
-        }
-        if (path.startsWith('/api/rename/') && request.method === 'POST') {
-            const filename = path.split('/').pop();
-            return handleRenameImage(filename, request, env);
-        }
-
-        return new Response('Not Found', { status: 404 });
+    
+        return new Response("Not Found", { status: 404 });
     }
 };
+
+// API 处理函数
+async function handleUpload(request, env) {
+    try {
+        const formData = await request.formData();
+        const file = formData.get('file');
+        const filename = formData.get('filename');
+        
+        if (!file) {
+            return new Response('No file uploaded', { status: 400 });
+        }
+
+        await env.MY_BUCKET.put(filename, file, {
+            httpMetadata: { 
+                contentType: file.type,
+                cacheControl: 'public, max-age=31536000'
+            }
+        });
+
+        const url = `${env.R2_DOMAIN}/${filename}`;
+        return new Response(JSON.stringify({ 
+            filename,
+            url,
+            size: file.size,
+            type: file.type
+        }), {
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (err) {
+        return new Response(JSON.stringify({error: err.message}), { 
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+async function handleListImages(request, env) {
+    try {
+        const list = await env.MY_BUCKET.list();
+        
+        if (!list || !list.objects) {
+            return new Response(JSON.stringify([]), {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0'
+                }
+            });
+        }
+
+        const images = list.objects.map(obj => ({
+            name: obj.key,
+            url: `${env.R2_DOMAIN}/${obj.key}`,
+            size: obj.size,
+            uploaded: obj.uploaded,
+            type: obj.httpMetadata?.contentType || 'image/*'
+        }));
+
+        return new Response(JSON.stringify(images), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+        });
+    } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+            status: 500,
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
+            }
+        });
+    }
+}
+
+async function handleDeleteImage(filename, env) {
+    try {
+        // 对文件名进行 URL 解码
+        const decodedFilename = decodeURIComponent(filename);
+
+        // 检查文件是否存在
+        const object = await env.MY_BUCKET.head(decodedFilename);
+        if (!object) {
+            return new Response(JSON.stringify({ error: 'File not found' }), {
+                status: 404,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-store'
+                }
+            });
+        }
+
+        // 删除文件
+        await env.MY_BUCKET.delete(decodedFilename);
+
+        // 等待一段时间确保删除完成
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // 再次验证文件是否已被删除
+        const checkObject = await env.MY_BUCKET.head(decodedFilename);
+        if (checkObject) {
+            throw new Error('File deletion failed');
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store'
+            }
+        });
+    } catch (err) {
+        console.error('Delete error:', err);
+        return new Response(JSON.stringify({ error: err.message }), {
+            status: 500,
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store'
+            }
+        });
+    }
+}
+
+async function handleMoveImage(filename, request, env) {
+    try {
+        const { folder } = await request.json();
+        if (!folder) {
+            return new Response(JSON.stringify({ error: 'Folder name is required' }), {
+                status: 400,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-store'
+                }
+            });
+        }
+
+        // 对文件名进行 URL 解码
+        const decodedFilename = decodeURIComponent(filename);
+
+        // 获取源文件
+        const sourceObject = await env.MY_BUCKET.get(decodedFilename);
+        if (!sourceObject) {
+            return new Response(JSON.stringify({ error: 'Source file not found' }), {
+                status: 404,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-store'
+                }
+            });
+        }
+
+        // 构建新的文件名
+        const newKey = folder + '/' + decodedFilename.split('/').pop();
+
+        // 复制文件到新位置
+        await env.MY_BUCKET.put(newKey, sourceObject.body, {
+            httpMetadata: sourceObject.httpMetadata
+        });
+
+        // 删除原文件
+        await env.MY_BUCKET.delete(decodedFilename);
+
+        return new Response(JSON.stringify({ success: true }), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store'
+            }
+        });
+    } catch (err) {
+        console.error('Move error:', err);
+        return new Response(JSON.stringify({ error: err.message }), {
+            status: 500,
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store'
+            }
+        });
+    }
+}
+
+async function handleRenameImage(filename, request, env) {
+    try {
+        const { newName } = await request.json();
+        
+        await env.MY_BUCKET.copy(filename, newName);
+        await env.MY_BUCKET.delete(filename);
+
+        return new Response(JSON.stringify({success: true}), {
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (err) {
+        return new Response(JSON.stringify({error: err.message}), { 
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+} 
 
 // 静态文件内容
 const INDEX_HTML = `<!DOCTYPE html>
@@ -1195,201 +1405,285 @@ const SCRIPT_JS = `
 })();
 `;
 
-// API 处理函数
-async function handleUpload(request, env) {
-    try {
-        const formData = await request.formData();
-        const file = formData.get('file');
-        const filename = formData.get('filename');
+
+const GALLERY_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gallery</title>
+    <style>
+        /* 通用样式 */
+        body {
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .tag-cloud {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+        }
+
+        .tag-cloud a {
+            padding: 5px 10px;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        .tag-cloud a:hover {
+            opacity: 0.8;
+        }
+
+        .tag-cloud a.selected {
+            color: #ffffff;
+        }
+
+        .gallery {
+            column-gap: 15px; 
+            max-width: 90%;
+            margin: 0 auto;
+        }
+
+        /* 响应式瀑布流 */
+        @media (min-width: 600px) {
+            .gallery {
+                column-count: 2; /* 平板设备 2 列 */
+            }
+        }
+
+        @media (min-width: 900px) {
+            .gallery {
+                column-count: 3; /* 小型电脑 3 列 */
+            }
+        }
+
+        @media (min-width: 1200px) {
+            .gallery {
+                column-count: 4; /* 大型电脑 4 列 */
+            }
+        }
+
+        .gallery-item {
+            margin-bottom: 15px; /* 控制项之间的垂直间距 */
+            break-inside: avoid; /* 防止元素拆分到不同列 */
+            position: relative;
+            overflow: hidden;
+            border-radius: 8px;
+            transition: transform 0.3s;
+            cursor: pointer;
+        }
+
+        .gallery-item:hover {
+            transform: scale(1.05);
+        }
+
+        .gallery-item img {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 8px;
+        }
+
+        /* 灯箱样式 */
+        #lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        #lightbox img {
+            max-width: 90%;
+            max-height: 90%;
+            transform-origin: center center;
+            transition: transform 0.3s;
+        }
+
+        /* 明亮模式样式 */
+        @media (prefers-color-scheme: light) {
+            body {
+                background-color: #f5f5f5;
+                color: #333;
+            }
+
+            h1 {
+                color: #333;
+            }
+
+            .tag-cloud a {
+                color: #333;
+                background-color: #e0e0e0;
+            }
+
+            .tag-cloud a.selected {
+                background-color: #6200ea;
+                color: #ffffff;
+            }
+
+            .gallery-item {
+                background-color: #f5f5f5;
+            }
+        }
+
+        /* 暗黑模式样式 */
+        @media (prefers-color-scheme: dark) {
+            body {
+                background-color: #121212;
+                color: #ffffff;
+            }
+
+            h1 {
+                color: #f5f5f5;
+            }
+
+            .tag-cloud a {
+                color: #b0bec5;
+                background-color: #333;
+            }
+
+            .tag-cloud a.selected {
+                background-color: #6200ea;
+                color: #ffffff;
+            }
+
+            .gallery-item {
+                background-color: #333;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="tag-cloud" class="tag-cloud"></div>
+    
+    <div id="gallery" class="gallery"></div>
+    
+    <div id="lightbox" onclick="closeLightbox()">
+        <img id="lightbox-image" src="" alt="Lightbox Image" draggable="false">
+    </div>
+
+    <script>
         
-        if (!file) {
-            return new Response('No file uploaded', { status: 400 });
+        const apiUrl = "/api/images"; // New API URL
+
+        async function fetchGalleryData() {
+            try {
+                let response = await fetch(apiUrl);
+                let data = await response.json();
+                renderGallery(data);
+                updateTagCloud(data);
+            } catch (error) {
+                console.error("Error fetching gallery data:", error);
+            }
         }
 
-        await env.MY_BUCKET.put(filename, file, {
-            httpMetadata: { 
-                contentType: file.type,
-                cacheControl: 'public, max-age=31536000'
-            }
-        });
-
-        const url = `${env.R2_DOMAIN}/${filename}`;
-        return new Response(JSON.stringify({ 
-            filename,
-            url,
-            size: file.size,
-            type: file.type
-        }), {
-            headers: { 'Content-Type': 'application/json' }
-        });
-    } catch (err) {
-        return new Response(JSON.stringify({error: err.message}), { 
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-}
-
-async function handleListImages(request, env) {
-    try {
-        const list = await env.MY_BUCKET.list();
         
-        if (!list || !list.objects) {
-            return new Response(JSON.stringify([]), {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-                    'Pragma': 'no-cache',
-                    'Expires': '0'
+        function renderGallery(data) {
+            const galleryContainer = document.getElementById("gallery");
+            galleryContainer.innerHTML = data.map(image => {
+                let dirs = image.name.split('/')[0];
+                let tags = image.name.split('/')[1]
+                    .split('-')
+                    .map(tag => tag.replace(/\.[^/.]+$/, "").trim())
+                    .filter(Boolean);
+                return \`<div class='gallery-item' onclick="openLightbox(event)" data-tags='\${dirs} \${tags.filter(Boolean).join(" ")}'>
+                    <img src="\${image.url}" alt="\${image.name}" loading="lazy">
+                </div>\`;
+            }).join('');
+            filterImages();
+        }
+
+        function filterImages() {
+            const galleryItems = document.querySelectorAll('.gallery-item');
+            let hasVisibleImages = false;
+
+            galleryItems.forEach(item => {
+                const itemTags = item.dataset.tags.split(' ');
+                const matches = selectedTags.every(tag => itemTags.includes(tag));
+
+                if (matches) {
+                    item.style.visibility = 'visible';
+                    item.style.position = 'static';
+                    hasVisibleImages = true;
+                } else {
+                    item.style.visibility = 'hidden';
+                    item.style.position = 'absolute';
                 }
             });
+
+            document.getElementById('gallery').style.display = hasVisibleImages ? 'block' : 'none';
         }
-
-        const images = list.objects.map(obj => ({
-            name: obj.key,
-            url: `${env.R2_DOMAIN}/${obj.key}`,
-            size: obj.size,
-            uploaded: obj.uploaded,
-            type: obj.httpMetadata?.contentType || 'image/*'
-        }));
-
-        return new Response(JSON.stringify(images), {
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            }
-        });
-    } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
-            status: 500,
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
-            }
-        });
-    }
-}
-
-async function handleDeleteImage(filename, env) {
-    try {
-        // 对文件名进行 URL 解码
-        const decodedFilename = decodeURIComponent(filename);
-
-        // 检查文件是否存在
-        const object = await env.MY_BUCKET.head(decodedFilename);
-        if (!object) {
-            return new Response(JSON.stringify({ error: 'File not found' }), {
-                status: 404,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Cache-Control': 'no-store'
-                }
-            });
-        }
-
-        // 删除文件
-        await env.MY_BUCKET.delete(decodedFilename);
-
-        // 等待一段时间确保删除完成
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // 再次验证文件是否已被删除
-        const checkObject = await env.MY_BUCKET.head(decodedFilename);
-        if (checkObject) {
-            throw new Error('File deletion failed');
-        }
-
-        return new Response(JSON.stringify({ success: true }), {
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-store'
-            }
-        });
-    } catch (err) {
-        console.error('Delete error:', err);
-        return new Response(JSON.stringify({ error: err.message }), {
-            status: 500,
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-store'
-            }
-        });
-    }
-}
-
-async function handleMoveImage(filename, request, env) {
-    try {
-        const { folder } = await request.json();
-        if (!folder) {
-            return new Response(JSON.stringify({ error: 'Folder name is required' }), {
-                status: 400,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Cache-Control': 'no-store'
-                }
-            });
-        }
-
-        // 对文件名进行 URL 解码
-        const decodedFilename = decodeURIComponent(filename);
-
-        // 获取源文件
-        const sourceObject = await env.MY_BUCKET.get(decodedFilename);
-        if (!sourceObject) {
-            return new Response(JSON.stringify({ error: 'Source file not found' }), {
-                status: 404,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Cache-Control': 'no-store'
-                }
-            });
-        }
-
-        // 构建新的文件名
-        const newKey = folder + '/' + decodedFilename.split('/').pop();
-
-        // 复制文件到新位置
-        await env.MY_BUCKET.put(newKey, sourceObject.body, {
-            httpMetadata: sourceObject.httpMetadata
-        });
-
-        // 删除原文件
-        await env.MY_BUCKET.delete(decodedFilename);
-
-        return new Response(JSON.stringify({ success: true }), {
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-store'
-            }
-        });
-    } catch (err) {
-        console.error('Move error:', err);
-        return new Response(JSON.stringify({ error: err.message }), {
-            status: 500,
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-store'
-            }
-        });
-    }
-}
-
-async function handleRenameImage(filename, request, env) {
-    try {
-        const { newName } = await request.json();
         
-        await env.MY_BUCKET.copy(filename, newName);
-        await env.MY_BUCKET.delete(filename);
+        function selectTag(tag, element) {
+            const index = selectedTags.indexOf(tag);
+            if (index === -1) {
+                selectedTags.push(tag);
+                element.classList.add('selected');
+            } else {
+                selectedTags.splice(index, 1);
+                element.classList.remove('selected');
+            }
+            filterImages();
+            updateTagCloud();
+        }
 
-        return new Response(JSON.stringify({success: true}), {
-            headers: { 'Content-Type': 'application/json' }
+        function updateTagCloud(data) {
+            const remainingTags = new Map(); // 使用 Map 来存储标签及其计数
+            const galleryItems = document.querySelectorAll('.gallery-item');
+
+            // 统计每个标签的出现次数
+            galleryItems.forEach(item => {
+                const itemTags = item.dataset.tags.split(' ');
+                if (selectedTags.every(tag => itemTags.includes(tag))) {
+                    itemTags.forEach(tag => {
+                        remainingTags.set(tag, (remainingTags.get(tag) || 0) + 1); // 计数
+                    });
+                }
+            });
+
+            // 对剩余标签按数量排序，并过滤掉数量为 1 的标签
+            const sortedRemainingTags = Array.from(remainingTags)
+                //.filter(([tag, count]) => count > 1) // 过滤掉计数为 1 的标签
+                .sort((a, b) => b[1] - a[1]);
+
+            const tagCloud = document.getElementById('tag-cloud');
+            tagCloud.innerHTML = sortedRemainingTags.map(([tag, count]) =>
+                \`<a href="#" onclick="selectTag('\${tag}', this)" class="\${selectedTags.includes(tag) ? 'selected' : ''}">\${tag} (\${count})</a>\`
+            ).join(' ');
+        }
+
+        function openLightbox(event) {
+            const lightbox = document.getElementById('lightbox');
+            const lightboxImage = document.getElementById('lightbox-image');
+            const img = event.currentTarget.querySelector('img');
+            
+            lightboxImage.src = img.src;
+            lightbox.style.display = 'flex';
+        }
+
+        function closeLightbox() {
+            document.getElementById('lightbox').style.display = 'none';
+        }
+
+        let selectedTags = [];
+        // 页面加载后，获取数据并显示类别
+        document.addEventListener('DOMContentLoaded', function () {
+            fetchGalleryData();
         });
-    } catch (err) {
-        return new Response(JSON.stringify({error: err.message}), { 
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-} 
+    </script>
+</body>
+</html>
+`
